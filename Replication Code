@@ -1,0 +1,156 @@
+log using "~", replace name(logRA1) smcl // Please change to your direction
+
+
+clear
+set more off
+
+
+********************************************************************************
+*** Please install the following package
+*** ssc install gr0034
+********************************************************************************
+
+
+global datapath "~" // Please change to your data direction path
+global output "~" // Please change to your output direction path
+
+
+********************************************************************************
+// Import and modify FOMC data
+import excel $datapath/Events_US_sel_updt, firstrow clear
+drop DateTime_local local_timezone Ctry
+gen date = mdy(month, day, year)
+format date %td
+order date
+duplicates report date
+duplicates list date L1_MPD
+gen pcdummy = .
+sort date hour
+replace pcdummy = 1 if L1_PC[_n+1] == 1
+* A press conference only happens after a FOMC meeting
+* generate a dummy variable indicating whether a FOMC meeting is followed by a press conference or not
+* consider only the scheduled meeting and announcement
+keep if L1_MPD == 1
+drop L1_uMPD L1_PC
+order date year month day hour minute L1_MPD pcdummy
+duplicates report date
+* all uniquely identified obs
+keep if date >= date("19970101", "YMD")
+* restricted to 1997 and thereafter
+tempfile anns
+save `anns', replace
+
+keep date pcdummy
+gen date3 = date + 1
+gen date1 = date - 1
+format date1 %td
+format date3 %td
+rename date date2
+gen pcdummy2 = 1 if pcdummy == 1
+gen pcdummy3 = 1 if pcdummy == 1
+rename pcdummy pcdummy1
+gen tt = _n
+* identify each scheduled FOMC meeting date
+reshape long date pcdummy, i(tt) j(boa)
+replace pcdummy = 0 if pcdummy == .
+* the variable "boa" means before (1), on (2), after (3) the FOMC meeting
+* this is the date before, on, and after the scheduled FOMC meeting
+tempfile date
+save `date', replace
+
+
+********************************************************************************
+// "Stock" data
+use $datapath/tick_data_SP_ES_EST_updt2017, clear
+keep if date >= date("19970101", "YMD")
+foreach var in hour minute year{
+	rename `var' `var'_trans // rename the current time variable for transaction time only
+}
+tempfile stock
+save `stock', replace
+
+
+********************************************************************************
+// Merge the data
+merge m:1 date using `date'
+keep if _merge == 3
+drop _merge 
+sort date
+gen time = hms(hour_trans, minute_trans,0)
+format time %tcHH:MM
+drop if time < hms(9,30,0) | time > hms(16,30,0)
+* restrict to only 9:30 to 15:30 daily
+
+
+********************************************************************************
+// Calculate Cumulative Return
+sort date time
+bys tt: gen cpr = ((f_es - f_es[1])/f_es[1])*100
+* percentage term
+
+
+********************************************************************************
+*** Replicate Figure
+********************************************************************************
+// Lucca and Moench (2015)
+preserve
+local varname cpr
+local group time boa
+collapse (mean) y = `varname' (sem) se_y = `varname', by(`group')
+sort `group'
+gen yu = y + 1.96*se_y
+gen yb = y - 1.96*se_y
+sort boa time
+egen index = group(boa time)
+
+twoway (rarea yu yb time if time > hms(9,30,0) & time < hms(15,30,0), fcolor(gray%50) lcolor(gray) lw(vthin)) ///
+	(line y time if time > hms(9,30,0) & time < hms(15,30,0),lcolor(black) ), ///
+	by(boa, title("Lucca and Moench (2015)") note("") col(3) im(small) ixl ixt) ///
+	xti("Time") yti("Cumulative Return (Percentage)") ///
+	ylabel(,labs(small) format(%7.2g)) ///
+	xlabel(,ang(45)) ///
+	legend(label(2 "FOMC") label(1 "95% CI") ) ///
+	subtitle("",bcolor(white)) /// 
+	graphregion(color(white)) aspectratio(`inv_golden_ratio') bgcolor(white) ///
+	name("f1", replace)
+	
+graph export $output/Lucca_Moench2.png, replace name("f1")
+
+restore
+
+
+********************************************************************************
+// Boguth et al (2018)
+preserve
+*** Key Difference: The two cumulative lines in Boguth is restricted to Apr 2011 to Sep 2017
+keep if date > date("20110401", "YMD") & date < date("20170901", "YMD")
+local varname2 cpr
+local group2 boa time pcdummy
+collapse (mean) z = `varname2' (sem) se_z = `varname2', by(`group2')
+sort `group2'
+gen zu = z + 1.96*se_z
+gen zb = z - 1.96*se_z
+sort pcdummy boa time
+egen index = group(boa time) if pcdummy == 0
+egen index1 = group(boa time) if pcdummy == 1
+replace index = index1 if pcdummy == 1
+
+twoway (rarea zu zb time if pcdummy == 0 & time > hms(9,30,0) & time < hms(15,30,0), fcolor(red%20) lcolor(red%80) lw(vthin)) ///
+	(rarea zu zb time if pcdummy == 1 & time > hms(9,30,0) & time < hms(15,30,0), fcolor(blue%20) lcolor(blue%80) lw(vthin)) ///
+	(line z time if pcdummy == 0 & time > hms(9,30,0) & time < hms(15,30,0), lp(dash) lcolor(red)) ///
+	(line z time if pcdummy == 1 & time > hms(9,30,0) & time < hms(15,30,0), lcolor(blue)), ///
+	by(boa, title("Boguth et al (2018)") note("") col(3) im(small) ixl ixt) ///
+	xti("Time") yti("Cumulative Return (Percentage)") ///
+	ylabel(,labs(small) format(%7.2g)) ///
+	xlabel(,ang(45)) ///
+	legend(order( 4 "With Press Conference" 3 "Without Press Conference")) ///
+	subtitle("",bcolor(white)) /// 
+	graphregion(color(white)) aspectratio(`inv_golden_ratio') bgcolor(white) ///
+	name("f2", replace)	
+
+graph export $output/boguth_et_al2.png, replace name("f2")
+restore
+
+********************************************************************************
+// END
+log c logRA1
